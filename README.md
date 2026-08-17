@@ -1,22 +1,16 @@
 # codex-watchdog
 
-`codex-watchdog` provides a one-command wrapper around the tmux-based Codex
-watchdog. It discovers the active root Codex thread from the target tmux pane,
-derives the root thread UUID from the rollout file actually opened by that
+`codex-watchdog` is a small Python CLI that makes the tmux-based Codex watchdog
+easy to use. It discovers the live root Codex thread from a tmux pane, resolves
+the correct root thread UUID from the rollout file actually opened by that
 Codex process, and then delegates recovery to `watch-codex-session.sh`.
 
-The goal is to make the common path short:
+The common path is intentionally short:
 
 ```bash
-codex-watch on
-codex-watch status
-codex-watch off
-```
-
-When multiple watchable Codex sessions exist, specify only the tmux session
-name:
-
-```bash
+codex-watch new touchstone_tests --workdir /path/to/repo --launcher codex-codexcn
+tmux attach -t touchstone_tests
+# inside Codex TUI: /goal <objective>
 codex-watch on touchstone_tests
 codex-watch status touchstone_tests
 codex-watch off touchstone_tests
@@ -31,17 +25,17 @@ This package does not guess by "latest session".
 Discovery starts from a live tmux pane, walks the pane process tree, inspects
 `/proc/<pid>/fd/*`, and accepts only a rollout file that is actually open by a
 Codex descendant process. The rollout must contain root `session_meta` with
-`source == "cli"`, and its Goal must be `active` or `blocked`.
+`source == "cli"`, and its native Codex Goal must be `active` or `blocked`.
 
-If discovery is ambiguous, the command fails and prints the candidate sessions
-so you can select one explicitly.
+The underlying watchdog will not inject input or restart work for paused,
+complete, usage-limited, budget-limited, missing-Goal, or untracked threads.
 
 ## Requirements
 
 - Linux with `/proc`
 - `tmux`
 - `jq`, `sqlite3`, `find`, `readlink`, `realpath`, `ps`, `awk`, `sed`, `wc`,
-  `flock` for the underlying shell watchdog
+  and `flock` for the underlying shell watchdog
 - Codex CLI running inside a dedicated one-pane tmux session
 - an active or blocked Codex native Goal
 
@@ -50,6 +44,7 @@ so you can select one explicitly.
 Development install:
 
 ```bash
+cd /root/data/disk/dev/codex-watchdog
 pip install -e .
 ```
 
@@ -74,65 +69,226 @@ Recommended isolated install:
 pipx install .
 ```
 
-## Typical workflow
+## Quick start
 
-Start Codex inside a dedicated tmux session:
+### 1. Create a dedicated Codex tmux session
+
+Use `new` to create a one-pane tmux session and start Codex inside it:
 
 ```bash
-tmux new -s touchstone_tests
-cd /path/to/your/repo
+codex-watch new touchstone_tests --workdir /root/data/disk/dev/stock_all_0520_web
+```
+
+By default this launches:
+
+```bash
 codex
 ```
 
-Create or resume a Codex Goal in that session. To create one, type a slash
-command in the Codex TUI:
+If you use a wrapper or alternate provider CLI, specify it here:
+
+```bash
+codex-watch new touchstone_tests \
+  --workdir /root/data/disk/dev/stock_all_0520_web \
+  --launcher codex-codexcn
+```
+
+`codex-watch new` saves the launcher choice under:
+
+```text
+~/.cache/codex-watchdog/sessions/<SESSION>.json
+```
+
+That means later commands can reuse it automatically.
+
+### 2. Attach and create a native Goal
+
+Attach to the tmux session:
+
+```bash
+tmux attach -t touchstone_tests
+```
+
+Inside the Codex TUI, create a native Goal:
 
 ```text
 /goal <objective>
 ```
 
-For example:
+Example:
 
 ```text
-/goal keep working through the continuous testing plan until the design is complete
+/goal complete the continuous testing design and keep working through recoverable failures
 ```
 
-Then from another terminal:
+Detach from tmux:
 
-```bash
-codex-watch on touchstone_tests
-codex-watch status touchstone_tests
-```
-
-If there is only one watchable Codex session, this is enough:
-
-```bash
-codex-watch on
-codex-watch status
-codex-watch off
-```
-
-Create a fresh tmux session:
-
-```bash
-codex-watch new touchstone_tests --workdir /path/to/your/repo
-tmux attach -t touchstone_tests
-```
-
-Inside Codex, submit a real task and create an active Goal with
-`/goal <objective>`. Wait until Codex is `Working` or the Goal is `blocked`;
-then detach and run:
-
-```bash
-codex-watch on touchstone_tests
+```text
+Ctrl-b d
 ```
 
 Important: a visible `Working` indicator is not enough by itself. `Working`
 only means the current Codex turn is running. The watchdog requires the same
 thread to have a native Goal row in `~/.codex/goals_1.sqlite` with status
-`active` or `blocked`. If `codex-watch on` reports `goal=missing`, the tmux
-session is a normal Codex thread/turn rather than Goal-backed autonomous work;
-run `/goal <objective>` inside the TUI, then rerun `codex-watch on`.
+`active` or `blocked`.
+
+### 3. Start the watchdog
+
+Start watching the session:
+
+```bash
+codex-watch on touchstone_tests
+```
+
+If the session was created with:
+
+```bash
+codex-watch new touchstone_tests --launcher codex-codexcn
+```
+
+then `on` automatically uses `codex-codexcn` for future stopped-process
+recovery. You do not need to repeat `--launcher codex-codexcn`.
+
+You can still override the launcher explicitly:
+
+```bash
+codex-watch on touchstone_tests --launcher codex
+```
+
+Launcher precedence is:
+
+```text
+explicit --launcher > launcher saved by `new` > codex
+```
+
+### 4. Check status
+
+```bash
+codex-watch status touchstone_tests
+```
+
+For a compact status line:
+
+```bash
+codex-watch status --one-line touchstone_tests
+```
+
+`RUNNING` with `Goal=active` is the positive signal that autonomous watchdog
+work is live. `WAITING_RETRY`, `RECOVERING`, `VERIFYING`, and `RECOVERED` are
+normal recovery states. `DISABLED Goal missing` means the thread is not
+Goal-backed and the watchdog will not control it.
+
+### 5. Stop the watchdog
+
+```bash
+codex-watch off touchstone_tests
+```
+
+Stopping kills only the watchdog tmux session. It does not kill the target
+Codex session.
+
+## Commands
+
+### Main lifecycle
+
+Create a dedicated tmux session and start Codex:
+
+```bash
+codex-watch new SESSION [--workdir DIR] [--launcher COMMAND]
+```
+
+Start watching a Codex session:
+
+```bash
+codex-watch on [SESSION] [--launcher COMMAND] [--base-wait SECONDS] [--max-wait SECONDS]
+```
+
+Show watchdog status:
+
+```bash
+codex-watch status [SESSION|THREAD_UUID] [--one-line]
+```
+
+Stop a watchdog without killing the target Codex session:
+
+```bash
+codex-watch off [SESSION|THREAD_UUID]
+```
+
+### Discovery and diagnostics
+
+List running watchdog sessions:
+
+```bash
+codex-watch ls
+```
+
+Explain what would be watched and validate the underlying watchdog arguments:
+
+```bash
+codex-watch doctor [SESSION] [--launcher COMMAND]
+```
+
+Run the underlying watchdog self-test:
+
+```bash
+codex-watch self-test
+```
+
+### Aliases
+
+```text
+start/up/watch -> on
+stop/down/rm   -> off
+st             -> status
+list           -> ls
+```
+
+### Common options
+
+```text
+--codex-home DIR       Default: $CODEX_HOME or ~/.codex
+--watcher PATH         Override watch-codex-session.sh
+--json                 Machine-readable output where supported
+```
+
+### Launcher option
+
+`--launcher COMMAND` controls which executable the watchdog uses when it needs
+to run:
+
+```bash
+COMMAND resume <THREAD_UUID>
+```
+
+Examples:
+
+```bash
+codex-watch new touchstone_tests --workdir /path/to/repo --launcher codex
+codex-watch new touchstone_tests_cn --workdir /path/to/repo --launcher codex-codexcn
+```
+
+If you created the session with `codex-watch new`, later `on` and `doctor`
+commands reuse the saved launcher automatically. If you created the tmux
+session manually, no launcher metadata exists, so `on` and `doctor` default to
+`codex` unless you pass `--launcher`.
+
+## Goal commands
+
+Native Goal commands in the Codex TUI follow:
+
+```text
+/goal [<objective>|clear|edit|pause|resume]
+```
+
+Useful examples:
+
+```text
+/goal complete the long-running implementation and verify it
+/goal pause
+/goal resume
+/goal clear
+```
 
 ## Troubleshooting
 
@@ -147,46 +303,26 @@ touchstone_tests  01a00f05-d696-73b0-bac1-7b199b7b2dd5  missing  blocked  Codex 
 
 This means discovery succeeded: `codex-watch` found the live root Codex thread
 opened by the tmux pane. The watchdog still refuses to start because the thread
-is not Goal-backed. This is intentional; the underlying watchdog will only
-inject recovery input, restart, or resume work for native Goals with status
-`active` or `blocked`.
+is not Goal-backed. Run `/goal <objective>` inside the Codex TUI, wait for the
+Goal to become active or blocked, then rerun:
 
-Native Goal commands in the Codex TUI follow:
-
-```text
-/goal [<objective>|clear|edit|pause|resume]
+```bash
+codex-watch on touchstone_tests
 ```
 
-## Commands
+### `launcher is not an executable`
 
-```text
-codex-watch on [SESSION]
-codex-watch off [SESSION|THREAD_UUID]
-codex-watch status [SESSION|THREAD_UUID]
-codex-watch ls
-codex-watch doctor [SESSION]
-codex-watch self-test
-codex-watch new SESSION [--workdir DIR]
+The underlying watchdog resolves launchers in a fresh login shell. If you use a
+custom wrapper such as `codex-codexcn`, make sure it is available on `PATH`:
+
+```bash
+command -v codex-codexcn
 ```
 
-Aliases:
+If needed, pass an absolute executable path:
 
-```text
-start/up/watch -> on
-stop/down/rm   -> off
-st             -> status
-list           -> ls
-```
-
-Useful options:
-
-```text
---codex-home DIR       Default: $CODEX_HOME or ~/.codex
---launcher COMMAND     Default: codex
---base-wait SECONDS    Default: 120
---max-wait SECONDS     Default: 3600
---watcher PATH         Override underlying watch-codex-session.sh
---json                 Machine-readable output where supported
+```bash
+codex-watch new touchstone_tests --workdir /path/to/repo --launcher /usr/local/bin/codex-codexcn
 ```
 
 ## Underlying watcher

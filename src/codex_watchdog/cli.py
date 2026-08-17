@@ -10,6 +10,9 @@ from typing import Any
 from . import __version__
 from .discover import discover_candidates, select_unique_watchable
 from .errors import CommandError, DiscoveryError, WatchdogError
+from .session_config import DEFAULT_LAUNCHER
+from .session_config import resolve_launcher as resolve_session_launcher
+from .session_config import save_session_config
 from .tmux import create_codex_session
 from .util import codex_home as default_codex_home
 from .util import print_json
@@ -61,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
 
     on = sub.add_parser("on", help="Start a watchdog for the unique or named Codex tmux session")
     on.add_argument("target", nargs="?", help="Optional tmux session name or SESSION:0.0 target")
-    on.add_argument("--launcher", default="codex")
+    on.add_argument("--launcher", default=None, help="Override launcher; defaults to launcher saved by `new`, then codex")
     on.add_argument("--base-wait", type=_positive_int, default=120)
     on.add_argument("--max-wait", type=_positive_int, default=3600)
     on.add_argument("--no-self-test", action="store_true")
@@ -69,7 +72,7 @@ def _parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Explain what Codex tmux session would be watched")
     doctor.add_argument("target", nargs="?", help="Optional tmux session name or SESSION:0.0 target")
-    doctor.add_argument("--launcher", default="codex")
+    doctor.add_argument("--launcher", default=None, help="Override launcher; defaults to launcher saved by `new`, then codex")
     common(doctor)
 
     status = sub.add_parser("status", help="Show watchdog status")
@@ -90,7 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     new = sub.add_parser("new", help="Create a dedicated tmux session running Codex")
     new.add_argument("session", help="New tmux session name")
     new.add_argument("--workdir", default=str(Path.cwd()))
-    new.add_argument("--launcher", default="codex")
+    new.add_argument("--launcher", default=DEFAULT_LAUNCHER)
     new.add_argument("--json", action="store_true")
 
     return p
@@ -167,11 +170,12 @@ def _cmd_on(args: argparse.Namespace) -> int:
         return 1
     if args.base_wait > args.max_wait:
         raise CommandError("--base-wait must be <= --max-wait")
+    launcher, launcher_source = resolve_session_launcher(candidate.pane.session_name, args.launcher)
     start_line, status_line = start_watchdog(
         candidate,
         codex_home=home,
         watcher=watcher,
-        launcher=args.launcher,
+        launcher=launcher,
         base_wait=args.base_wait,
         max_wait=args.max_wait,
         self_test=not args.no_self_test,
@@ -184,12 +188,18 @@ def _cmd_on(args: argparse.Namespace) -> int:
                 "pane": candidate.pane.target,
                 "thread": candidate.thread_id,
                 "cwd": candidate.cwd,
+                "launcher": launcher,
+                "launcher_source": launcher_source,
                 "start": start_line,
                 "status": status_line,
             }
         )
     else:
-        print(f"FOUND session={candidate.pane.session_name} pane={candidate.pane.target} thread={candidate.thread_id} goal={candidate.goal_status}")
+        print(
+            f"FOUND session={candidate.pane.session_name} pane={candidate.pane.target} "
+            f"thread={candidate.thread_id} goal={candidate.goal_status} "
+            f"launcher={launcher} ({launcher_source})"
+        )
         if start_line:
             print(start_line)
         if status_line:
@@ -202,9 +212,18 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     watcher = resolve_watcher(home, args.watcher)
     candidates = discover_candidates(args.target, home)
     candidate = select_unique_watchable(candidates)
-    out = doctor_watchdog(candidate, codex_home=home, watcher=watcher, launcher=args.launcher)
+    launcher, launcher_source = resolve_session_launcher(candidate.pane.session_name, args.launcher)
+    out = doctor_watchdog(candidate, codex_home=home, watcher=watcher, launcher=launcher)
     if args.json:
-        print_json({"ok": True, "candidate": candidate.display_row(), "doctor": out})
+        print_json(
+            {
+                "ok": True,
+                "candidate": candidate.display_row(),
+                "launcher": launcher,
+                "launcher_source": launcher_source,
+                "doctor": out,
+            }
+        )
     else:
         print(out)
     return 0
@@ -262,12 +281,15 @@ def _cmd_new(args: argparse.Namespace) -> int:
     if not workdir.exists():
         raise CommandError(f"workdir does not exist: {workdir}")
     create_codex_session(args.session, workdir, args.launcher)
+    config_path = save_session_config(args.session, workdir=workdir, launcher=args.launcher)
     if args.json:
         print_json(
             {
                 "ok": True,
                 "session": args.session,
                 "workdir": workdir,
+                "launcher": args.launcher,
+                "config": config_path,
                 "next": [
                     f"tmux attach -t {args.session}",
                     "create or resume a Codex Goal",
@@ -276,7 +298,8 @@ def _cmd_new(args: argparse.Namespace) -> int:
             }
         )
     else:
-        print(f"CREATED tmux session={args.session} workdir={workdir}")
+        print(f"CREATED tmux session={args.session} workdir={workdir} launcher={args.launcher}")
+        print(f"Saved launcher metadata: {config_path}")
         print(f"Next: tmux attach -t {args.session}")
         print("Inside Codex, submit a real task and create or resume an active Goal.")
         print("Wait until Codex is Working or Goal blocked, detach, then run:")
