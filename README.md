@@ -327,19 +327,20 @@ codex-watch new touchstone_tests --workdir /path/to/repo --launcher /usr/local/b
 
 ## Underlying watcher
 
-By default `codex-watch` prefers:
-
-```text
-$CODEX_HOME/skills/watch-codex-session/scripts/watch-codex-session.sh
-```
-
-If that skill is not installed, it falls back to the bundled copy included in
-this package and materializes it under:
+By default `codex-watch` uses the versioned copy bundled with this package and
+materializes it under:
 
 ```text
 ~/.cache/codex-watchdog/watch-codex-session.sh
 ```
 
-The Python CLI only discovers and orchestrates. The long-running recovery loop,
-tmux status bar, 429 handling, blocked Goal resume, and stopped-process
-recovery remain in `watch-codex-session.sh`.
+This avoids an older independently installed skill shadowing a newer package.
+Use `--watcher PATH` when an explicit external watcher is required. The Python
+CLI only discovers and orchestrates. The long-running recovery loop, tmux
+status bar, retryable provider 429/500/502/503/504 handling, blocked Goal
+resume, and stopped-process recovery remain in `watch-codex-session.sh`.
+
+Provider retries still require an active or blocked native Goal. The watchdog
+does not inject input into `Goal=missing`, paused, complete, usage-limited, or
+budget-limited sessions, and it does not retry authentication/authorization
+errors such as 401/403.

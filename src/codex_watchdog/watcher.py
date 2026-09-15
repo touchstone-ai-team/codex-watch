@@ -13,7 +13,6 @@ from pathlib import Path
 from .errors import CommandError, DiscoveryError
 from .models import Candidate, WatchSession
 from .tmux import watcher_sessions
-from .util import codex_home as default_codex_home
 from .util import is_uuid, session_from_target
 
 
@@ -56,10 +55,6 @@ def resolve_watcher(codex_home: Path | None = None, override: str | None = None)
             raise CommandError(f"watchdog script is not executable: {path}")
         return path
 
-    home = codex_home or default_codex_home()
-    skill_path = home / "skills" / "watch-codex-session" / "scripts" / "watch-codex-session.sh"
-    if skill_path.exists() and os.access(skill_path, os.X_OK):
-        return skill_path
     return _materialize_bundled_watcher()
 
 
