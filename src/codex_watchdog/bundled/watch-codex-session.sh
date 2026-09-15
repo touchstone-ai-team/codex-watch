@@ -202,16 +202,28 @@ is_working_screen() {
     return 1
 }
 
-has_root_429() {
-    local line trimmed found=
+root_retryable_provider_state() {
+    local line trimmed normalized found=
     while IFS= read -r line; do
         trimmed=${line#"${line%%[![:space:]]*}"}
         case "$trimmed" in
-            '■ exceeded retry limit, last status: 429 Too Many Requests'*) found=1 ;;
+            '■ '*)
+                normalized=${trimmed#'■ '}
+                if [[ "$normalized" =~ (^|[[:space:]:])(429)([[:space:]:]|$) ]]; then
+                    found=rate_limited
+                elif [[ "$normalized" =~ (^|[[:space:]:])(500|502|503|504)([[:space:]:]|$) ]] \
+                    || [[ "${normalized,,}" == *'system cpu overloaded'* ]] \
+                    || [[ "${normalized,,}" == *'temporarily unavailable'* ]] \
+                    || [[ "${normalized,,}" == *'service unavailable'* ]] \
+                    || [[ "${normalized,,}" == *'bad gateway'* ]] \
+                    || [[ "${normalized,,}" == *'gateway timeout'* ]]; then
+                    found=provider_unavailable
+                fi
+                ;;
             '• '*) found= ;;
         esac
     done <<<"$1"
-    [[ -n "$found" ]]
+    [[ -n "$found" ]] && printf '%s' "$found"
 }
 
 pane_process_state() {
@@ -268,7 +280,7 @@ rollout_has_user_message_after() {
 }
 
 classify() {
-    local process=$1 goal=$2 screen=$3 pending=${4:-0}
+    local process=$1 goal=$2 screen=$3 pending=${4:-0} provider_state
     case "$goal" in
         paused|complete|usage_limited|budget_limited) printf 'terminal:%s' "$goal"; return ;;
         active|blocked) ;;
@@ -282,8 +294,8 @@ classify() {
         printf 'busy'
     elif [[ "$goal" == blocked || "$screen" == *'Goal blocked (/goal resume)'* ]]; then
         printf 'blocked'
-    elif has_root_429 "$screen"; then
-        printf 'rate_limited'
+    elif provider_state=$(root_retryable_provider_state "$screen"); then
+        printf '%s' "$provider_state"
     elif (( pending > 0 )); then
         printf 'subagent_failed'
     else
@@ -491,7 +503,7 @@ run_watchdog() {
                 sleep "$POLL_SECONDS"
                 continue
                 ;;
-            blocked|rate_limited|subagent_failed|stopped) ;;
+            blocked|rate_limited|provider_unavailable|subagent_failed|stopped) ;;
             *)
                 log 'state check failed; retrying'
                 sleep "$POLL_SECONDS"
@@ -519,6 +531,11 @@ run_watchdog() {
             rate_limited)
                 if ! continue_normal "$CONTINUE_TEXT" 'root_429'; then
                     publish_state 'RECOVERY_FAILED' 'root 429 continuation failed'
+                fi
+                ;;
+            provider_unavailable)
+                if ! continue_normal "$CONTINUE_TEXT" 'root_provider_unavailable'; then
+                    publish_state 'RECOVERY_FAILED' 'provider unavailable continuation failed'
                 fi
                 ;;
             subagent_failed)
@@ -622,6 +639,15 @@ self_test() {
     [[ $(classify codex blocked '⠹ Working (12s • esc to interrupt)' 0) == busy ]]
     [[ $(classify codex blocked 'Goal blocked (/goal resume)' 0) == blocked ]]
     [[ $(classify codex active '■ exceeded retry limit, last status: 429 Too Many Requests' 0) == rate_limited ]]
+    [[ $(classify codex active '■ unexpected status 500 Internal Server Error' 0) == provider_unavailable ]]
+    [[ $(classify codex active '■ unexpected status 502 Bad Gateway' 0) == provider_unavailable ]]
+    [[ $(classify codex active '■ unexpected status 503 Service Unavailable: system cpu overloaded' 0) == provider_unavailable ]]
+    [[ $(classify codex active '■ unexpected status 504 Gateway Timeout' 0) == provider_unavailable ]]
+    [[ $(classify codex active '■ unexpected status 401 Unauthorized' 0) == idle ]]
+    [[ $(classify codex active '■ unexpected status 403 Forbidden' 0) == idle ]]
+    [[ $(classify codex active $'■ unexpected status 503 Service Unavailable\n• Explored current state' 0) == idle ]]
+    [[ $(classify codex '' '■ unexpected status 503 Service Unavailable' 0) == untracked ]]
+    [[ $(classify codex complete '■ unexpected status 503 Service Unavailable' 0) == terminal:complete ]]
     [[ $(classify codex active 'ready' 2) == subagent_failed ]]
     [[ $(classify shell active 'prompt' 0) == stopped ]]
     [[ $(classify unknown active 'prompt' 0) == unsafe ]]
